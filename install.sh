@@ -24,6 +24,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# 配置文件路径
+CONFIG_FILE="/etc/mac_random/interfaces.conf"
+
 # 检查命令是否存在
 check_commands() {
     for cmd in ip iwinfo hexdump; do
@@ -974,7 +977,7 @@ MAC地址随机化脚本安装工具
     2. 建议安装/卸载后重启路由器
     3. 确保系统已安装必要的命令: ip, iwinfo, hexdump
 
-更多信息请访问: https://github.com/cachenow/openwrt-mac-random-changer
+更多信息请访问: https://github.com/yourusername/mac-random
 EOF
 }
 
