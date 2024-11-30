@@ -5,6 +5,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+CYAN='\033[0;36m'
 
 # 脚本安装位置
 INSTALL_DIR="/usr/bin"
@@ -167,6 +168,7 @@ read_input() {
 # 创建配置文件
 create_config() {
     local interfaces="$1"
+    local wan_interface="$2"
     
     echo "创建配置文件..."
     
@@ -176,10 +178,25 @@ create_config() {
         mkdir -p "/etc/mac_random"
     fi
     
+    # 确保接口列表包含所有选择的接口
+    interfaces=$(echo "$interfaces" | tr ' ' '\n' | sort | uniq | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+    
     # 写入配置文件
     echo "写入配置文件..."
-    echo "INTERFACES=\"$interfaces\"" > "/etc/mac_random/interfaces.conf"
+    {
+        echo "# 常规接口"
+        echo "INTERFACES=\"$interfaces\""
+        if [ -n "$wan_interface" ]; then
+            echo "# WAN口"
+            echo "WAN_INTERFACE=\"$wan_interface\""
+        fi
+    } > "/etc/mac_random/interfaces.conf"
+    
     echo "配置文件已创建: /etc/mac_random/interfaces.conf"
+    
+    # 显示写入的内容
+    echo -e "\n${GREEN}配置文件内容：${NC}"
+    cat "/etc/mac_random/interfaces.conf"
 }
 
 # MAC随机化脚本内容
@@ -207,6 +224,7 @@ check_commands() {
 change_mac() {
     local interface="$1"
     local new_mac="$2"
+    local is_wan="$3"
     
     ip link set "$interface" down
     ip link set "$interface" address "$new_mac"
@@ -214,6 +232,24 @@ change_mac() {
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}成功修改 $interface 的MAC地址为: $new_mac${NC}"
+        if [ "$is_wan" = "1" ]; then
+            echo -e "${YELLOW}正在重启 WAN 口...${NC}"
+            # 如果存在 wan_up 脚本，执行它
+            if [ -f "/etc/hotplug.d/iface/20-wan_up" ]; then
+                ACTION="ifup" INTERFACE="$interface" /etc/hotplug.d/iface/20-wan_up
+            fi
+            # 如果有 uci，重启 wan 接口
+            if command -v uci >/dev/null 2>&1; then
+                ifup wan
+            fi
+            # 如果有 pppd，重启 pppoe
+            if command -v pppd >/dev/null 2>&1; then
+                ifdown wan
+                sleep 2
+                ifup wan
+            fi
+            echo -e "${GREEN}WAN 口重启完成${NC}"
+        fi
     else
         echo -e "${RED}修改 $interface 的MAC地址失败${NC}"
     fi
@@ -353,6 +389,7 @@ main() {
     # 读取配置文件
     if [ -f "$config_file" ]; then
         local interfaces=$(grep "^INTERFACES=" "$config_file" | cut -d'"' -f2)
+        local wan_interface=$(grep "^WAN_INTERFACE=" "$config_file" | cut -d'"' -f2)
     else
         echo -e "${RED}配置文件未找到${NC}"
         exit 1
@@ -360,12 +397,24 @@ main() {
     
     # 修改接口
     for interface in $interfaces; do
+        # 跳过 WAN 口，稍后处理
+        [ "$interface" = "$wan_interface" ] && continue
+        
         echo -e "\n${YELLOW}处理接口: $interface${NC}"
         local mac_info=$(generate_mac)
         local new_mac=$(echo "$mac_info" | tail -n1)
         echo -e "$mac_info"
-        change_mac "$interface" "$new_mac"
+        change_mac "$interface" "$new_mac" "0"
     done
+    
+    # 处理 WAN 口
+    if [ -n "$wan_interface" ]; then
+        echo -e "\n${YELLOW}处理 WAN 口: $wan_interface${NC}"
+        local mac_info=$(generate_mac)
+        local new_mac=$(echo "$mac_info" | tail -n1)
+        echo -e "$mac_info"
+        change_mac "$wan_interface" "$new_mac" "1"
+    fi
     
     echo -e "\n${GREEN}所有接口MAC地址修改完成${NC}"
 }
@@ -383,16 +432,85 @@ create_init_script() {
 #!/bin/sh /etc/rc.common
 
 START=99
+STOP=99
 USE_PROCD=1
+EXTRA_COMMANDS="status"
 PROG=$INSTALL_DIR/$SCRIPT_NAME
 
+boot() {
+    # 在启动时添加延迟，确保网络就绪
+    (sleep 30 && start) &
+}
+
 start_service() {
+    # 检查网络接口是否就绪
+    local config_file="/etc/mac_random/interfaces.conf"
+    if [ -f "\$config_file" ]; then
+        local interfaces=\$(grep "^INTERFACES=" "\$config_file" | cut -d'"' -f2)
+        local wan_interface=\$(grep "^WAN_INTERFACE=" "\$config_file" | cut -d'"' -f2)
+        for interface in \$interfaces \$wan_interface; do
+            # 等待接口就绪
+            for i in \$(seq 1 30); do
+                if ip link show "\$interface" >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 1
+            done
+        done
+    fi
+
     procd_open_instance
     procd_set_param command \$PROG
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_close_instance
+}
+
+stop_service() {
+    echo "Nothing to stop"
+}
+
+status() {
+    local config_file="/etc/mac_random/interfaces.conf"
+    if [ -f "\$config_file" ]; then
+        local interfaces=\$(grep "^INTERFACES=" "\$config_file" | cut -d'"' -f2)
+        local wan_interface=\$(grep "^WAN_INTERFACE=" "\$config_file" | cut -d'"' -f2)
+        
+        echo "MAC随机化服务状态："
+        if pgrep -f "\$PROG" >/dev/null; then
+            echo "服务状态: 运行中"
+        else
+            echo "服务状态: 已停止"
+        fi
+        
+        echo -e "\n接口状态："
+        for interface in \$interfaces; do
+            if ip link show "\$interface" >/dev/null 2>&1; then
+                local mac=\$(ip link show "\$interface" | grep -o "ether.*" | awk '{print \$2}')
+                echo "* \$interface - MAC: \$mac"
+            else
+                echo "* \$interface - 未就绪"
+            fi
+        done
+        
+        if [ -n "\$wan_interface" ]; then
+            echo -e "\nWAN口状态："
+            if ip link show "\$wan_interface" >/dev/null 2>&1; then
+                local mac=\$(ip link show "\$wan_interface" | grep -o "ether.*" | awk '{print \$2}')
+                local state=\$(ip link show "\$wan_interface" | grep -w "state" | awk '{print \$9}')
+                echo "* \$wan_interface - MAC: \$mac, 状态: \$state"
+                # 显示IP地址
+                local ip=\$(ip addr show "\$wan_interface" | grep -w inet | awk '{print \$2}')
+                [ -n "\$ip" ] && echo "  IP地址: \$ip"
+            else
+                echo "* \$wan_interface - 未就绪"
+            fi
+        fi
+    else
+        echo "配置文件未找到"
+        return 1
+    fi
 }
 
 reload_service() {
@@ -567,91 +685,99 @@ get_interface_by_number() {
 
 # 手动选择接口
 manual_select_interfaces() {
-    local selected_interfaces=""
-    local interface_list=""
+    local selected=""
+    local wan_detected=""
+    
+    echo -e "\n${YELLOW}可用的网络接口：${NC}\n"
+    
+    # 显示LAN口
+    echo -e "${GREEN}LAN口：${NC}"
     local i=1
-    
-    echo -e "\n${YELLOW}可用的网络接口：${NC}"
-    
-    # LAN口分组
     if ip link show br-lan >/dev/null 2>&1; then
-        echo -e "\n${GREEN}LAN口：${NC}"
-        local desc=$(get_interface_description "br-lan")
-        echo "$i) br-lan${desc:+ - $desc}"
-        interface_list="br-lan"
-        i=$((i + 1))
+        echo "$i) br-lan"
+        eval "interface_$i=br-lan"
+        i=$((i+1))
     fi
     
-    # 无线接口分组
+    # 显示无线接口
     local wireless_found=0
-    for interface in $all_interfaces; do
-        if echo "$essid_interfaces" | grep -q "$interface"; then
-            if [ $wireless_found -eq 0 ]; then
-                echo -e "\n${GREEN}无线接口：${NC}"
+    echo -e "\n${GREEN}无线接口：${NC}"
+    for interface in $(ls /sys/class/net/ | grep -E "^ra|^rax|^wlan" | sort); do
+        if [ "$interface" != "${interface#ra}" ] || [ "$interface" != "${interface#rax}" ] || [ "$interface" != "${interface#wlan}" ]; then
+            local desc=$(get_interface_description "$interface")
+            if [ -n "$desc" ] && [[ "$desc" != *"中继模式"* ]]; then
+                echo "$i) $interface${desc:+ - $desc}"
+                eval "interface_$i=$interface"
+                i=$((i+1))
                 wireless_found=1
             fi
-            local desc=$(get_interface_description "$interface")
-            echo "$i) $interface${desc:+ - $desc}"
-            interface_list="$interface_list $interface"
-            i=$((i + 1))
         fi
     done
+    [ $wireless_found -eq 0 ] && echo -e "${YELLOW}未检测到无线接口${NC}"
     
-    # 中继接口分组
-    local client_found=0
-    for interface in $all_interfaces; do
-        if echo "$interface" | grep -q "apcli"; then
-            if [ $client_found -eq 0 ]; then
-                echo -e "\n${GREEN}中继接口：${NC}"
-                client_found=1
-            fi
-            local desc=$(get_interface_description "$interface")
+    # 显示中继接口
+    local repeater_found=0
+    echo -e "\n${GREEN}中继接口：${NC}"
+    for interface in $(ls /sys/class/net/ | grep -E "^apcli|^apclii" | sort); do
+        local desc=$(get_interface_description "$interface")
+        if [ -n "$desc" ]; then
             echo "$i) $interface${desc:+ - $desc}"
-            interface_list="$interface_list $interface"
-            i=$((i + 1))
+            eval "interface_$i=$interface"
+            i=$((i+1))
+            repeater_found=1
         fi
     done
+    [ $repeater_found -eq 0 ] && echo -e "${YELLOW}未检测到中继接口${NC}"
     
-    # WAN口分组
+    # 显示WAN口
     local wan_found=0
-    for interface in $all_interfaces; do
-        if echo "$wan_interfaces" | grep -q "$interface"; then
-            if [ $wan_found -eq 0 ]; then
-                echo -e "\n${GREEN}WAN口：${NC}"
-                wan_found=1
-            fi
-            local desc=$(get_interface_description "$interface")
-            echo "$i) $interface${desc:+ - $desc}"
-            interface_list="$interface_list $interface"
-            i=$((i + 1))
-        fi
-    done
+    echo -e "\n${GREEN}WAN口：${NC}"
+    local wan_interfaces=""
+    if command -v uci >/dev/null 2>&1; then
+        wan_interfaces=$(uci show network | grep "=wan" | cut -d. -f2 | cut -d= -f1)
+    fi
+    [ -z "$wan_interfaces" ] && wan_interfaces=$(ip route | grep default | awk '{print $5}' | sort | uniq)
     
-    # 其他接口分组
+    if [ -n "$wan_interfaces" ]; then
+        for interface in $wan_interfaces; do
+            local desc=$(get_interface_description "$interface")
+            echo "$i) $interface - WAN口（连接外网）"
+            eval "interface_$i=$interface"
+            eval "is_wan_$i=1"
+            i=$((i+1))
+            wan_found=1
+        done
+    fi
+    [ $wan_found -eq 0 ] && echo -e "${YELLOW}未检测到WAN口${NC}"
+    
+    # 显示其他接口
+    echo -e "\n${GREEN}其他接口：${NC}"
     local other_found=0
-    for interface in $all_interfaces; do
-        if ! echo "$interface_list" | grep -q "$interface"; then
-            if [ $other_found -eq 0 ]; then
-                echo -e "\n${GREEN}其他接口：${NC}"
-                other_found=1
-            fi
-            local desc=$(get_interface_description "$interface")
-            echo "$i) $interface${desc:+ - $desc}"
-            interface_list="$interface_list $interface"
-            i=$((i + 1))
+    for interface in $(ls /sys/class/net/ | grep -E "^eth|^en" | sort); do
+        # 跳过已经显示的WAN口
+        if echo "$wan_interfaces" | grep -q "$interface"; then
+            continue
         fi
+        local desc=$(get_interface_description "$interface")
+        echo "$i) $interface - 以太网接口 [$(ip link show $interface | grep -o "state [A-Z]*" | cut -d' ' -f2)]"
+        eval "interface_$i=$interface"
+        i=$((i+1))
+        other_found=1
     done
+    [ $other_found -eq 0 ] && echo -e "${YELLOW}未检测到其他接口${NC}"
     
-    # 清理interface_list，确保没有多余的空格
-    interface_list=$(echo "$interface_list" | tr -s ' ' | sed 's/^ *//;s/ *$//')
-    
-    echo -e "\n${YELLOW}请选择要配置的接口（输入接口编号，多个接口用空格分隔，输入0完成选择）：${NC}"
+    # 用户选择
+    local max_choice=$((i-1))
+    local selected_interfaces=""
+    local selected_wan=""
     
     while true; do
-        read -p "> " choices
+        echo -e "\n${YELLOW}请选择要配置的接口（输入接口编号，多个接口用空格分隔，输入0完成选择）：${NC}"
+        echo -n "> "
+        read choices
         
         if [ "$choices" = "0" ]; then
-            if [ -z "$selected_interfaces" ]; then
+            if [ -z "$selected_interfaces" ] && [ -z "$selected_wan" ]; then
                 echo -e "${RED}错误：至少需要选择一个接口${NC}"
                 continue
             fi
@@ -659,57 +785,62 @@ manual_select_interfaces() {
         fi
         
         local valid=1
+        local new_interfaces=""
+        local new_wan=""
         
         for choice in $choices; do
-            if ! [ "$choice" -eq "$choice" ] 2>/dev/null; then
-                echo -e "${RED}错误：'$choice' 不是有效的数字${NC}"
+            if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "$max_choice" ]; then
+                echo -e "${RED}无效的选择: $choice${NC}"
                 valid=0
                 break
             fi
             
-            # 获取接口名称
-            local selected_interface=$(echo "$interface_list" | tr ' ' '\n' | sed -n "${choice}p" | tr -d ' ')
+            eval "local interface=\$interface_$choice"
+            eval "local is_wan=\$is_wan_$choice"
             
-            if [ -z "$selected_interface" ]; then
-                echo -e "${RED}错误：'$choice' 不是有效的接口编号${NC}"
-                valid=0
-                break
-            fi
-            
-            # 检查是否已经选择了这个接口
-            if echo "$selected_interfaces" | grep -wq "$selected_interface"; then
-                echo -e "${YELLOW}接口 $selected_interface 已经被选择，将被移除${NC}"
-                selected_interfaces=$(echo "$selected_interfaces" | tr ' ' '\n' | grep -v "^$selected_interface$" | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+            if [ "$is_wan" = "1" ]; then
+                new_wan="$interface"
             else
-                selected_interfaces="$selected_interfaces $selected_interface"
-                selected_interfaces=$(echo "$selected_interfaces" | tr ' ' '\n' | sort | uniq | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+                new_interfaces="$new_interfaces $interface"
             fi
         done
         
         if [ $valid -eq 1 ]; then
-            echo -e "${GREEN}已选择的接口：${NC}"
+            # 添加新选择的接口到已选列表
+            if [ -n "$new_interfaces" ]; then
+                selected_interfaces="$selected_interfaces $new_interfaces"
+                # 去重
+                selected_interfaces=$(echo "$selected_interfaces" | tr ' ' '\n' | sort | uniq | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+            fi
+            if [ -n "$new_wan" ]; then
+                selected_wan="$new_wan"
+            fi
+            
+            echo -e "\n${GREEN}已选择的接口：${NC}"
             for interface in $selected_interfaces; do
                 local desc=$(get_interface_description "$interface")
-                echo "* $interface${desc:+ - $desc}"
+                echo -e "${CYAN}* $interface${desc:+ - $desc}${NC}"
             done
-            echo -e "\n${YELLOW}继续选择其他接口或输入0完成选择${NC}"
+            if [ -n "$selected_wan" ]; then
+                local desc=$(get_interface_description "$selected_wan")
+                echo -e "${YELLOW}* $selected_wan - WAN口（连接外网）${NC}"
+            fi
         fi
     done
     
-    # 将选择的接口写入临时文件
+    # 保存选择的接口
     echo "$selected_interfaces" > /tmp/selected_interfaces
+    [ -n "$selected_wan" ] && echo "$selected_wan" > /tmp/selected_wan
 }
 
 # 安装脚本
 install_script() {
-    echo -e "${YELLOW}开始安装...${NC}"
-    
-    # 检查必需的命令
-    check_dependencies
+    echo -e "${YELLOW}开始安装过程...${NC}"
     
     # 配置接口
     echo -e "\n${YELLOW}配置网络接口...${NC}"
     local selected_interfaces=""
+    local selected_wan=""
     
     # 获取可用接口
     echo "正在扫描网络接口..."
@@ -744,85 +875,63 @@ install_script() {
                 selected_interfaces="$selected_interfaces $interface"
             done
         fi
-        
-        # 清理选择的接口列表
-        selected_interfaces=$(echo "$selected_interfaces" | tr ' ' '\n' | sort | uniq | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
-        
-        if [ -z "$selected_interfaces" ]; then
-            echo -e "${RED}错误：未检测到可配置的默认接口${NC}"
-            exit 1
-        fi
-        
-        # 显示将配置的接口
-        echo -e "\n${GREEN}将配置以下接口：${NC}"
-        for interface in $selected_interfaces; do
-            local desc=$(get_interface_description "$interface")
-            echo "* $interface${desc:+ - $desc}"
-        done
-        
-        # 确认配置
-        echo -e "\n${YELLOW}是否确认使用以上配置？${NC}"
-        echo "1) 确认"
-        echo "2) 返回手动选择"
-        read -p "请选择 [1-2]: " confirm_choice
-        
-        if [ "$confirm_choice" != "1" ]; then
-            interface_choice=2
-        fi
-    fi
-    
-    if [ "$interface_choice" = "2" ]; then
+    elif [ "$interface_choice" = "2" ]; then
         # 手动选择接口
+        SELECTED_WAN=""  # 全局变量，用于在manual_select_interfaces中传递WAN口
         manual_select_interfaces
+        
         if [ -f /tmp/selected_interfaces ]; then
             selected_interfaces=$(cat /tmp/selected_interfaces)
             rm -f /tmp/selected_interfaces
-        else
-            echo -e "${RED}错误：接口选择失败${NC}"
-            exit 1
         fi
         
-        if [ -z "$selected_interfaces" ]; then
-            echo -e "${RED}错误：未选择任何接口${NC}"
-            exit 1
+        if [ -f /tmp/selected_wan ]; then
+            selected_wan=$(cat /tmp/selected_wan)
+            rm -f /tmp/selected_wan
         fi
+    else
+        echo -e "${RED}无效的选择${NC}"
+        exit 1
     fi
     
-    # 询问是否添加WAN口
-    if [ -n "$wan_interfaces" ]; then
+    # 如果在手动选择时没有选择WAN口，询问是否添加
+    if [ -z "$selected_wan" ] && [ -n "$wan_interfaces" ]; then
         echo -e "\n${YELLOW}检测到以下WAN接口：${NC}"
         echo "0) 不添加WAN接口"
         local wan_i=1
-        local wan_array=""
         for wan in $wan_interfaces; do
             echo "$wan_i) $wan"
-            wan_array="$wan_array $wan"
+            eval "wan_$wan_i=$wan"
             wan_i=$((wan_i+1))
         done
         
         read -p "请选择要添加的WAN接口编号 [0-$((wan_i-1))]: " wan_choice
         if [ "$wan_choice" != "0" ] && [ "$wan_choice" -gt 0 ] && [ "$wan_choice" -lt "$wan_i" ]; then
-            local wan_interface=$(echo "$wan_array" | tr ' ' '\n' | sed -n "${wan_choice}p" | tr -d ' ')
-            if [ -n "$wan_interface" ]; then
-                selected_interfaces="$selected_interfaces $wan_interface"
-                echo -e "${GREEN}已添加WAN接口: $wan_interface${NC}"
+            eval "selected_wan=\$wan_$wan_choice"
+            if [ -n "$selected_wan" ]; then
+                # 从常规接口列表中移除 WAN 口（如果存在）
+                selected_interfaces=$(echo "$selected_interfaces" | tr ' ' '\n' | grep -v "^$selected_wan$" | tr '\n' ' ')
+                echo -e "${GREEN}已添加WAN接口: $selected_wan${NC}"
             fi
         fi
     fi
     
-    # 去除重复的接口并清理
+    # 去除重复的接口
     selected_interfaces=$(echo "$selected_interfaces" | tr ' ' '\n' | sort | uniq | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
     
-    echo -e "\n${GREEN}最终选择的接口：${NC}"
-    for interface in $selected_interfaces; do
-        local desc=$(get_interface_description "$interface")
-        echo "* $interface${desc:+ - $desc}"
-    done
+    echo -e "\n${GREEN}接口配置：${NC}"
+    echo "常规接口: $selected_interfaces"
+    [ -n "$selected_wan" ] && echo "WAN口: $selected_wan"
     
-    # 开始安装过程
+    if [ -z "$selected_interfaces" ] && [ -z "$selected_wan" ]; then
+        echo -e "${RED}错误：未选择任何接口${NC}"
+        exit 1
+    fi
+    
+    # 安装脚本
     echo -e "\n${YELLOW}开始安装过程...${NC}"
     echo "创建配置文件..."
-    create_config "$selected_interfaces"
+    create_config "$selected_interfaces" "$selected_wan"
     
     echo "创建主脚本..."
     create_mac_random_script
@@ -836,7 +945,7 @@ install_script() {
     echo -e "\n${GREEN}安装完成！${NC}"
     echo "您可以通过以下方式使用："
     echo "1. 手动运行：$INSTALL_DIR/$SCRIPT_NAME"
-    echo "2. 服务控制：/etc/init.d/$INIT_SCRIPT_NAME {start|stop|restart}"
+    echo "2. 服务控制：/etc/init.d/$INIT_SCRIPT_NAME {start|stop|restart|status}"
     
     # 询问是否重启
     ask_reboot
@@ -896,6 +1005,7 @@ ask_reboot() {
     
     while true; do
         read -p "请选择 [1-2]: " choice
+        
         case "$choice" in
             1)
                 echo -e "${GREEN}系统将在3秒后重启...${NC}"
