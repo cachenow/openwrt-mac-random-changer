@@ -1034,7 +1034,7 @@ MAC地址随机化脚本安装工具
     2. 建议安装/卸载后重启路由器
     3. 确保系统已安装必要的命令: ip, iwinfo, hexdump
 
-更多信息请访问: https://github.com/yourusername/mac-random
+更多信息请访问: https://github.com/cachenow/openwrt-mac-random-changer
 EOF
 }
 
