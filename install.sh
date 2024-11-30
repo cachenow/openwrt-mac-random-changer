@@ -11,204 +11,6 @@ INSTALL_DIR="/usr/bin"
 SCRIPT_NAME="mac_random.sh"
 INIT_SCRIPT_NAME="mac_random"
 INIT_SCRIPT_PATH="/etc/init.d/$INIT_SCRIPT_NAME"
-CONFIG_FILE="/etc/mac_random/interfaces.conf"
-
-# MAC随机化脚本内容
-create_mac_random_script() {
-    cat > "$INSTALL_DIR/$SCRIPT_NAME" << 'EOF'
-#!/bin/sh
-
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# 配置文件路径
-CONFIG_FILE="/etc/mac_random/interfaces.conf"
-
-# 检查命令是否存在
-check_commands() {
-    for cmd in ip iwinfo hexdump; do
-        if ! which "$cmd" >/dev/null 2>&1; then
-            echo -e "${RED}错误: 命令 '$cmd' 未找到${NC}"
-            exit 1
-        fi
-    done
-}
-
-# 修改MAC地址
-change_mac() {
-    local interface="$1"
-    local new_mac="$2"
-    
-    ip link set "$interface" down
-    ip link set "$interface" address "$new_mac"
-    ip link set "$interface" up
-    
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}成功修改 $interface 的MAC地址为: $new_mac${NC}"
-    else
-        echo -e "${RED}修改 $interface 的MAC地址失败${NC}"
-    fi
-}
-
-# 生成随机MAC地址
-generate_mac() {
-    # 生成一个1-48的随机数
-    local rand=$(hexdump -n 1 -e '1/1 "%u"' /dev/urandom)
-    local vendor_index=$((rand % 48))
-    
-    # 各大厂商的OUI前缀列表
-    local prefix
-    local vendor_name
-    case "$vendor_index" in
-        0|1|2) 
-            prefix="D8:5D:4C"
-            vendor_name="TP-Link"
-            ;;
-        3|4|5) 
-            prefix="F4:EC:38"
-            vendor_name="TP-Link"
-            ;;
-        6|7) 
-            prefix="00:14:BF"
-            vendor_name="Linksys"
-            ;;
-        8|9) 
-            prefix="DC:9F:DB"
-            vendor_name="Linksys"
-            ;;
-        10|11) 
-            prefix="00:50:F1"
-            vendor_name="Buffalo"
-            ;;
-        12|13) 
-            prefix="20:4E:7F"
-            vendor_name="Buffalo"
-            ;;
-        14|15) 
-            prefix="00:18:E7"
-            vendor_name="Netgear"
-            ;;
-        16|17) 
-            prefix="B0:48:7A"
-            vendor_name="Asus"
-            ;;
-        18|19) 
-            prefix="00:15:6D"
-            vendor_name="D-Link"
-            ;;
-        20|21) 
-            prefix="00:24:6C"
-            vendor_name="Qualcomm"
-            ;;
-        22|23) 
-            prefix="48:2C:6A"
-            vendor_name="Qualcomm"
-            ;;
-        24|25) 
-            prefix="00:28:F8"
-            vendor_name="Intel"
-            ;;
-        26|27) 
-            prefix="3C:F8:62"
-            vendor_name="Intel"
-            ;;
-        28|29) 
-            prefix="00:0E:6A"
-            vendor_name="Broadcom"
-            ;;
-        30|31) 
-            prefix="00:17:C2"
-            vendor_name="Broadcom"
-            ;;
-        32|33) 
-            prefix="00:04:A3"
-            vendor_name="MediaTek"
-            ;;
-        34|35) 
-            prefix="00:14:A4"
-            vendor_name="MediaTek"
-            ;;
-        36|37) 
-            prefix="00:03:93"
-            vendor_name="Apple"
-            ;;
-        38|39) 
-            prefix="00:0A:27"
-            vendor_name="Apple"
-            ;;
-        40|41) 
-            prefix="00:12:17"
-            vendor_name="Cisco"
-            ;;
-        42|43) 
-            prefix="00:15:E8"
-            vendor_name="Ubiquiti"
-            ;;
-        44|45) 
-            prefix="00:0C:43"
-            vendor_name="Ralink"
-            ;;
-        46|47) 
-            prefix="00:14:6C"
-            vendor_name="Netis"
-            ;;
-        *) 
-            prefix="D8:5D:4C"
-            vendor_name="TP-Link"
-            ;;
-    esac
-    
-    # 生成随机后缀
-    local suffix=$(hexdump -n3 -e '/1 ":%02X"' /dev/urandom)
-    
-    # 输出厂商名称和MAC地址
-    echo "使用厂商: $vendor_name"
-    echo "$prefix$suffix"
-}
-
-# 主程序
-main() {
-    # 检查root权限
-    if [ "$(id -u)" != "0" ]; then
-        echo -e "${RED}此脚本需要root权限运行${NC}"
-        exit 1
-    fi
-    
-    # 检查必需的命令
-    check_commands
-    
-    # 获取配置文件
-    local config_file="$CONFIG_FILE"
-    
-    # 读取配置文件
-    if [ -f "$config_file" ]; then
-        local interfaces=$(grep "^INTERFACES=" "$config_file" | cut -d'"' -f2)
-    else
-        echo -e "${RED}配置文件未找到${NC}"
-        exit 1
-    fi
-    
-    # 修改接口
-    for interface in $interfaces; do
-        echo -e "\n${YELLOW}处理接口: $interface${NC}"
-        local mac_info=$(generate_mac)
-        local new_mac=$(echo "$mac_info" | tail -n1)
-        echo -e "$mac_info"
-        change_mac "$interface" "$new_mac"
-    done
-    
-    echo -e "\n${GREEN}所有接口MAC地址修改完成${NC}"
-}
-
-# 运行主程序
-main
-EOF
-
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-}
 
 # 检查是否为root用户
 check_root() {
@@ -376,13 +178,208 @@ create_config() {
     
     # 写入配置文件
     echo "写入配置文件..."
-    echo "$interfaces" > "$CONFIG_FILE"
-    echo "配置文件已创建: $CONFIG_FILE"
+    echo "INTERFACES=\"$interfaces\"" > "/etc/mac_random/interfaces.conf"
+    echo "配置文件已创建: /etc/mac_random/interfaces.conf"
+}
+
+# MAC随机化脚本内容
+create_mac_random_script() {
+    cat > "$INSTALL_DIR/$SCRIPT_NAME" << 'EOF'
+#!/bin/sh
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# 检查命令是否存在
+check_commands() {
+    for cmd in ip iwinfo hexdump; do
+        if ! which "$cmd" >/dev/null 2>&1; then
+            echo -e "${RED}错误: 命令 '$cmd' 未找到${NC}"
+            exit 1
+        fi
+    done
+}
+
+# 修改MAC地址
+change_mac() {
+    local interface="$1"
+    local new_mac="$2"
+    
+    ip link set "$interface" down
+    ip link set "$interface" address "$new_mac"
+    ip link set "$interface" up
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}成功修改 $interface 的MAC地址为: $new_mac${NC}"
+    else
+        echo -e "${RED}修改 $interface 的MAC地址失败${NC}"
+    fi
+}
+
+# 生成随机MAC地址
+generate_mac() {
+    # 生成一个1-48的随机数
+    local rand=$(hexdump -n 1 -e '1/1 "%u"' /dev/urandom)
+    local vendor_index=$((rand % 48))
+    
+    # 各大厂商的OUI前缀列表
+    local prefix
+    local vendor_name
+    case "$vendor_index" in
+        0|1|2) 
+            prefix="D8:5D:4C"
+            vendor_name="TP-Link"
+            ;;
+        3|4|5) 
+            prefix="F4:EC:38"
+            vendor_name="TP-Link"
+            ;;
+        6|7) 
+            prefix="00:14:BF"
+            vendor_name="Linksys"
+            ;;
+        8|9) 
+            prefix="DC:9F:DB"
+            vendor_name="Linksys"
+            ;;
+        10|11) 
+            prefix="00:50:F1"
+            vendor_name="Buffalo"
+            ;;
+        12|13) 
+            prefix="20:4E:7F"
+            vendor_name="Buffalo"
+            ;;
+        14|15) 
+            prefix="00:18:E7"
+            vendor_name="Netgear"
+            ;;
+        16|17) 
+            prefix="B0:48:7A"
+            vendor_name="Asus"
+            ;;
+        18|19) 
+            prefix="00:15:6D"
+            vendor_name="D-Link"
+            ;;
+        20|21) 
+            prefix="00:24:6C"
+            vendor_name="Qualcomm"
+            ;;
+        22|23) 
+            prefix="48:2C:6A"
+            vendor_name="Qualcomm"
+            ;;
+        24|25) 
+            prefix="00:28:F8"
+            vendor_name="Intel"
+            ;;
+        26|27) 
+            prefix="3C:F8:62"
+            vendor_name="Intel"
+            ;;
+        28|29) 
+            prefix="00:0E:6A"
+            vendor_name="Broadcom"
+            ;;
+        30|31) 
+            prefix="00:17:C2"
+            vendor_name="Broadcom"
+            ;;
+        32|33) 
+            prefix="00:04:A3"
+            vendor_name="MediaTek"
+            ;;
+        34|35) 
+            prefix="00:14:A4"
+            vendor_name="MediaTek"
+            ;;
+        36|37) 
+            prefix="00:03:93"
+            vendor_name="Apple"
+            ;;
+        38|39) 
+            prefix="00:0A:27"
+            vendor_name="Apple"
+            ;;
+        40|41) 
+            prefix="00:12:17"
+            vendor_name="Cisco"
+            ;;
+        42|43) 
+            prefix="00:15:E8"
+            vendor_name="Ubiquiti"
+            ;;
+        44|45) 
+            prefix="00:0C:43"
+            vendor_name="Ralink"
+            ;;
+        46|47) 
+            prefix="00:14:6C"
+            vendor_name="Netis"
+            ;;
+        *) 
+            prefix="D8:5D:4C"
+            vendor_name="TP-Link"
+            ;;
+    esac
+    
+    # 生成随机后缀
+    local suffix=$(hexdump -n3 -e '/1 ":%02X"' /dev/urandom)
+    
+    # 输出厂商名称和MAC地址
+    echo "使用厂商: $vendor_name"
+    echo "$prefix$suffix"
+}
+
+# 主程序
+main() {
+    # 检查root权限
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${RED}此脚本需要root权限运行${NC}"
+        exit 1
+    fi
+    
+    # 检查必需的命令
+    check_commands
+    
+    # 获取配置文件
+    local config_dir="/etc/mac_random"
+    local config_file="$config_dir/interfaces.conf"
+    
+    # 读取配置文件
+    if [ -f "$config_file" ]; then
+        local interfaces=$(grep "^INTERFACES=" "$config_file" | cut -d'"' -f2)
+    else
+        echo -e "${RED}配置文件未找到${NC}"
+        exit 1
+    fi
+    
+    # 修改接口
+    for interface in $interfaces; do
+        echo -e "\n${YELLOW}处理接口: $interface${NC}"
+        local mac_info=$(generate_mac)
+        local new_mac=$(echo "$mac_info" | tail -n1)
+        echo -e "$mac_info"
+        change_mac "$interface" "$new_mac"
+    done
+    
+    echo -e "\n${GREEN}所有接口MAC地址修改完成${NC}"
+}
+
+# 运行主程序
+main
+EOF
+
+    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 }
 
 # 创建init.d启动脚本
 create_init_script() {
-    cat > "$INIT_SCRIPT_PATH" << EOF
+    cat > "/etc/init.d/$INIT_SCRIPT_NAME" << EOF
 #!/bin/sh /etc/rc.common
 
 START=99
@@ -403,7 +400,7 @@ reload_service() {
     start
 }
 EOF
-    chmod +x "$INIT_SCRIPT_PATH"
+    chmod +x "/etc/init.d/$INIT_SCRIPT_NAME"
 }
 
 # 配置定时任务
@@ -955,9 +952,9 @@ MAC地址随机化脚本安装工具
        - 中继接口 (apcli等)
     
 配置文件:
-    - 接口配置: $CONFIG_FILE
+    - 接口配置: /etc/mac_random/interfaces.conf
     - 主程序: $INSTALL_DIR/$SCRIPT_NAME
-    - 启动脚本: $INIT_SCRIPT_PATH
+    - 启动脚本: /etc/init.d/$INIT_SCRIPT_NAME
     
 使用示例:
     1. 交互式安装:
