@@ -50,10 +50,7 @@ mac_random.sh
 
 2. 通过OpenWrt启动脚本控制：
 ```bash
-/etc/init.d/mac_random enable  # 设置开机自启
-/etc/init.d/mac_random start   # 启动服务
-/etc/init.d/mac_random stop    # 停止服务
-/etc/init.d/mac_random restart # 重启服务
+/etc/init.d/mac_random restart # 与运行 mac_random.sh 功能一致
 ```
 
 ## 配置文件
