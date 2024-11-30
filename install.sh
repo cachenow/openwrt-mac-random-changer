@@ -432,9 +432,6 @@ create_init_script() {
 #!/bin/sh /etc/rc.common
 
 START=99
-STOP=99
-USE_PROCD=1
-EXTRA_COMMANDS="status"
 PROG=$INSTALL_DIR/$SCRIPT_NAME
 
 boot() {
@@ -442,7 +439,7 @@ boot() {
     (sleep 30 && start) &
 }
 
-start_service() {
+start() {
     # 检查网络接口是否就绪
     local config_file="/etc/mac_random/interfaces.conf"
     if [ -f "\$config_file" ]; then
@@ -459,62 +456,12 @@ start_service() {
         done
     fi
 
-    procd_open_instance
-    procd_set_param command \$PROG
-    procd_set_param respawn
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
+    # 直接运行脚本
+    \$PROG
 }
 
-stop_service() {
-    echo "Nothing to stop"
-}
-
-status() {
-    local config_file="/etc/mac_random/interfaces.conf"
-    if [ -f "\$config_file" ]; then
-        local interfaces=\$(grep "^INTERFACES=" "\$config_file" | cut -d'"' -f2)
-        local wan_interface=\$(grep "^WAN_INTERFACE=" "\$config_file" | cut -d'"' -f2)
-        
-        echo "MAC随机化服务状态："
-        if pgrep -f "\$PROG" >/dev/null; then
-            echo "服务状态: 运行中"
-        else
-            echo "服务状态: 已停止"
-        fi
-        
-        echo -e "\n接口状态："
-        for interface in \$interfaces; do
-            if ip link show "\$interface" >/dev/null 2>&1; then
-                local mac=\$(ip link show "\$interface" | grep -o "ether.*" | awk '{print \$2}')
-                echo "* \$interface - MAC: \$mac"
-            else
-                echo "* \$interface - 未就绪"
-            fi
-        done
-        
-        if [ -n "\$wan_interface" ]; then
-            echo -e "\nWAN口状态："
-            if ip link show "\$wan_interface" >/dev/null 2>&1; then
-                local mac=\$(ip link show "\$wan_interface" | grep -o "ether.*" | awk '{print \$2}')
-                local state=\$(ip link show "\$wan_interface" | grep -w "state" | awk '{print \$9}')
-                echo "* \$wan_interface - MAC: \$mac, 状态: \$state"
-                # 显示IP地址
-                local ip=\$(ip addr show "\$wan_interface" | grep -w inet | awk '{print \$2}')
-                [ -n "\$ip" ] && echo "  IP地址: \$ip"
-            else
-                echo "* \$wan_interface - 未就绪"
-            fi
-        fi
-    else
-        echo "配置文件未找到"
-        return 1
-    fi
-}
-
-reload_service() {
-    stop
+# restart别名为start
+restart() {
     start
 }
 EOF
@@ -615,6 +562,7 @@ show_interface_list() {
     # 先显示br-lan（如果存在）
     if ip link show br-lan >/dev/null 2>&1; then
         echo "$i) br-lan"
+        eval "interface_$i=br-lan"
         i=$((i+1))
     fi
     
@@ -622,6 +570,7 @@ show_interface_list() {
     if [ -n "$essid_interfaces" ]; then
         for interface in $essid_interfaces; do
             echo "$i) $interface"
+            eval "interface_$i=$interface"
             i=$((i+1))
         done
     fi
@@ -631,6 +580,7 @@ show_interface_list() {
         # 跳过已经显示的接口
         if [ "$interface" != "br-lan" ] && ! echo "$essid_interfaces" | grep -q "$interface"; then
             echo "$i) $interface"
+            eval "interface_$i=$interface"
             i=$((i+1))
         fi
     done
@@ -1084,7 +1034,7 @@ MAC地址随机化脚本安装工具
     2. 建议安装/卸载后重启路由器
     3. 确保系统已安装必要的命令: ip, iwinfo, hexdump
 
-更多信息请访问: https://github.com/cachenow/openwrt-mac-random-changer
+更多信息请访问: https://github.com/yourusername/mac-random
 EOF
 }
 
@@ -1115,39 +1065,64 @@ process_args() {
     esac
 }
 
+# 检查安装状态
+check_install_status() {
+    local status=""
+    local details=""
+    
+    # 检查主脚本
+    if [ -f "$INSTALL_DIR/$SCRIPT_NAME" ]; then
+        status="${GREEN}已安装${NC}"
+        details="\n- 主脚本: ${GREEN}已安装${NC} ($INSTALL_DIR/$SCRIPT_NAME)"
+    else
+        status="${RED}未安装${NC}"
+        details="\n- 主脚本: ${RED}未安装${NC}"
+    fi
+    
+    # 检查init.d脚本
+    if [ -f "$INIT_SCRIPT_PATH" ]; then
+        details="$details\n- 启动脚本: ${GREEN}已安装${NC} ($INIT_SCRIPT_PATH)"
+    else
+        details="$details\n- 启动脚本: ${RED}未安装${NC}"
+    fi
+    
+    # 检查配置文件
+    if [ -f "/etc/mac_random/interfaces.conf" ]; then
+        details="$details\n- 配置文件: ${GREEN}已安装${NC} (/etc/mac_random/interfaces.conf)"
+    else
+        details="$details\n- 配置文件: ${RED}未安装${NC}"
+    fi
+    
+    # 检查cron任务
+    if crontab -l 2>/dev/null | grep -q "$SCRIPT_NAME"; then
+        details="$details\n- 定时任务: ${GREEN}已配置${NC}"
+    else
+        details="$details\n- 定时任务: ${RED}未配置${NC}"
+    fi
+    
+    echo -e "$status$details"
+}
+
 # 显示主菜单
 show_menu() {
-    while true; do
-        echo -e "${YELLOW}MAC地址随机化脚本安装/卸载工具${NC}"
-        echo "1) 安装"
-        echo "2) 卸载"
-        echo "3) 帮助"
-        echo "4) 退出"
-        read -p "请选择 [1-4]: " choice
-        
-        case "$choice" in
-            1)
-                install_script
-                break
-                ;;
-            2)
-                uninstall_script
-                break
-                ;;
-            3)
-                show_help
-                echo -e "\n按回车键继续..."
-                read
-                ;;
-            4)
-                echo "退出安装程序"
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}无效的选择${NC}"
-                ;;
-        esac
-    done
+    clear
+    echo -e "${CYAN}MAC地址随机化工具 - 安装菜单${NC}\n"
+    echo -e "当前状态: $(check_install_status)\n"
+    echo "1. 安装"
+    echo "2. 卸载"
+    echo "3. 帮助"
+    echo "4. 退出"
+    echo
+    printf "请选择操作 [1-4]: "
+    read choice
+
+    case "$choice" in
+        1) install_script ;;
+        2) uninstall_script ;;
+        3) show_help ;;
+        4) exit 0 ;;
+        *) echo -e "\n${RED}无效的选择${NC}" && sleep 2 && show_menu ;;
+    esac
 }
 
 # 主程序
